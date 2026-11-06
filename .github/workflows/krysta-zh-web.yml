@@ -1,0 +1,176 @@
+name: Krysta zh web build
+
+# 动效节点: builds an official EffectCraft web release with a bundled CJK fallback font, because the
+# browser build cannot scan system fonts and ships no CJK face (upstream #1445, PR #1621). Nothing
+# runs on push or on a schedule: a build starts only when someone dispatches it (the Krysta admin
+# page, or "Run workflow" here), and only for the tag that person names.
+#
+# Steps: check out the official tag → stop if upstream already bundles a CJK face (then our patch is
+# pointless and the official build can be installed) → apply krysta/patch/cjk-font.patch and add the
+# font → build with the repository's own packaging/web/package.sh → check the font really is inside
+# the wasm and that the build names itself a Krysta build → publish <version> as a GitHub release,
+# with SHA256SUMS.txt for the installer to verify. Any failure publishes nothing.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Official EffectCraft tag to build from, e.g. v0.21.1"
+        type: string
+        required: true
+        default: "v0.21.1"
+      revision:
+        description: "Krysta revision of that tag (-zhN); raise it when the patch or the font changes"
+        type: string
+        required: true
+        default: "1"
+      publish:
+        description: "Publish a release (off: keep the zip as a workflow artifact only)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: krysta-zh-web-${{ inputs.tag }}-zh${{ inputs.revision }}
+  cancel-in-progress: false
+
+env:
+  # Droid Sans Fallback (Apache-2.0, AOSP): 3.9 MB, GB2312 6763/6763 covered. The exact bytes the
+  # patch was written and tested against; other bytes fail the checksum instead of shipping.
+  FONT_URL: https://raw.githubusercontent.com/agilecho2022-lgtm/effectcraft/94e33b06081f0958cf55e0dd710d416ab8b07150/assets/fonts/DroidSansFallback.ttf
+  FONT_SHA256: 05d71b179ef97b82cf1bb91cef290c600a510f77f39b4964359e3ef88378c79d
+  # Must match `const WASM_BINDGEN` in the release's xtask/src/main.rs.
+  WASM_BINDGEN: "0.2.129"
+  # Official 0.21.1 wasm size, used to prove the 3.9 MB font is really inside the build.
+  WASM_BASELINE: "71551384"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Validate inputs
+        id: v
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag }}"
+          rev="${{ inputs.revision }}"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::tag must look like v0.21.1"; exit 1; }
+          [[ "$rev" =~ ^[1-9][0-9]*$ ]] || { echo "::error::revision must be a number like 1"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}-zh$rev" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the official release
+        uses: actions/checkout@v4
+        with:
+          repository: storytold/effectcraft
+          ref: ${{ steps.v.outputs.tag }}
+          fetch-depth: 1
+
+      - name: Does upstream already bundle a CJK face?
+        id: upstream
+        run: |
+          set -euo pipefail
+          if grep -rqsE 'DroidSansFallback|NotoSansCJK|NotoSansSC|NotoSansJP|SourceHanSans|WEB_CJK_FALLBACK' \
+               crates/text/src/fonts.rs crates/ui-egui/src/theme.rs assets/fonts; then
+            echo "bundled=yes" >> "$GITHUB_OUTPUT"
+            echo "::warning::Upstream ${{ steps.v.outputs.tag }} already ships a CJK fallback face; nothing was built. Install the official web release of ${{ steps.v.outputs.tag }} instead."
+          else
+            echo "bundled=no" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch the Krysta patch set
+        if: steps.upstream.outputs.bundled == 'no'
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: .krysta
+
+      - name: Apply the CJK font patch and add the font
+        if: steps.upstream.outputs.bundled == 'no'
+        run: |
+          set -euo pipefail
+          patch_file=".krysta/krysta/patch/cjk-font.patch"
+          test -f "$patch_file" || { echo "::error::$patch_file is missing"; exit 1; }
+          if ! git apply --check -v "$patch_file"; then
+            echo "::error::The patch no longer applies to ${{ steps.v.outputs.tag }}: upstream changed crates/text/src/fonts.rs or crates/ui-egui/src/theme.rs. Update krysta/patch/cjk-font.patch, then dispatch again. Nothing was published."
+            exit 1
+          fi
+          git apply "$patch_file"
+          curl -fsSL --retry 3 -o assets/fonts/DroidSansFallback.ttf "$FONT_URL"
+          echo "$FONT_SHA256  assets/fonts/DroidSansFallback.ttf" | sha256sum -c -
+          cp .krysta/krysta/patch/DroidSansFallback.ttf.attribution assets/fonts/
+          cp .krysta/krysta/patch/NOTICE-Droid.txt assets/fonts/
+          git status --short
+          ls -l assets/fonts/DroidSansFallback.ttf
+
+      - name: Tools
+        if: steps.upstream.outputs.bundled == 'no'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zip
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup default 1.95.0
+          rustup target add wasm32-unknown-unknown
+          cargo install wasm-bindgen-cli --version "$WASM_BINDGEN" --locked
+          wasm-bindgen --version
+          cargo --version
+
+      - name: Build
+        if: steps.upstream.outputs.bundled == 'no'
+        run: |
+          set -euo pipefail
+          export EFFECTCRAFT_VERSION="${{ steps.v.outputs.version }}"
+          export EFFECTCRAFT_BUILD_SHA="$(git rev-parse HEAD)+krysta-zh${{ inputs.revision }}"
+          bash packaging/web/package.sh
+          ls -l dist/release/
+
+      - name: Check the build is the patched one
+        if: steps.upstream.outputs.bundled == 'no'
+        run: |
+          set -euo pipefail
+          name="effectcraft-web-${{ steps.v.outputs.version }}"
+          zip="dist/release/$name.zip"
+          test -f "$zip" || { echo "::error::$zip was not produced"; exit 1; }
+          rm -rf /tmp/zh && mkdir -p /tmp/zh && unzip -q "$zip" -d /tmp/zh
+          wasm="/tmp/zh/$name/effectcraft_web_bg.wasm"
+          index="/tmp/zh/$name/index.html"
+          test -f "$wasm" || { echo "::error::no wasm in the zip"; exit 1; }
+          size=$(stat -c%s "$wasm")
+          echo "wasm $size bytes (official baseline $WASM_BASELINE)"
+          # The 3.9 MB font must show up in the wasm: anything under baseline + 3 MB means the
+          # patch or the wasm-opt step dropped it.
+          test $((size)) -ge $((WASM_BASELINE + 3000000)) || { echo "::error::the wasm did not grow by the font size: the font is not embedded"; exit 1; }
+          grep -qa "Droid Sans Fallback" "$wasm" || { echo "::error::the font's name table is not in the wasm"; exit 1; }
+          grep -qa "krysta-zh" "$wasm" || { echo "::error::the build does not carry the Krysta build string"; exit 1; }
+          grep -qa "\${{ steps.v.outputs.version }}" "$index" || echo "::warning::index.html does not mention the version"
+          cd dist/release && sha256sum "$name.zip" > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - name: Keep the zip as a workflow artifact
+        if: steps.upstream.outputs.bundled == 'no' && inputs.publish == false
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.v.outputs.version }}
+          path: |
+            dist/release/*.zip
+            dist/release/SHA256SUMS.txt
+          retention-days: 14
+
+      - name: Publish the release
+        if: steps.upstream.outputs.bundled == 'no' && inputs.publish != false
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.v.outputs.version }}
+          name: ${{ steps.v.outputs.version }}
+          body: |
+            EffectCraft `${{ inputs.tag }}` web build with a bundled CJK fallback font, for Krysta's 动效节点.
+
+            Built from the official tag `${{ inputs.tag }}` with `krysta/patch/cjk-font.patch` (the font part of upstream #1621: Droid Sans Fallback, Apache-2.0, embedded in the browser build) and no other change.
+
+            File: `effectcraft-web-${{ steps.v.outputs.version }}.zip` with `SHA256SUMS.txt`.
+          files: |
+            dist/release/*.zip
+            dist/release/SHA256SUMS.txt
+          fail_on_unmatched_files: true
