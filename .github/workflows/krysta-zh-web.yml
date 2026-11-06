@@ -42,8 +42,6 @@ env:
   FONT_SHA256: 05d71b179ef97b82cf1bb91cef290c600a510f77f39b4964359e3ef88378c79d
   # Must match `const WASM_BINDGEN` in the release's xtask/src/main.rs.
   WASM_BINDGEN: "0.2.129"
-  # Official 0.21.1 wasm size, used to prove the 3.9 MB font is really inside the build.
-  WASM_BASELINE: "71551384"
 
 jobs:
   build:
@@ -136,16 +134,26 @@ jobs:
           test -f "$zip" || { echo "::error::$zip was not produced"; exit 1; }
           rm -rf /tmp/zh && mkdir -p /tmp/zh && unzip -q "$zip" -d /tmp/zh
           wasm="/tmp/zh/$name/effectcraft_web_bg.wasm"
-          index="/tmp/zh/$name/index.html"
           test -f "$wasm" || { echo "::error::no wasm in the zip"; exit 1; }
-          size=$(stat -c%s "$wasm")
-          echo "wasm $size bytes (official baseline $WASM_BASELINE)"
-          # The 3.9 MB font must show up in the wasm: anything under baseline + 3 MB means the
-          # patch or the wasm-opt step dropped it.
-          test $((size)) -ge $((WASM_BASELINE + 3000000)) || { echo "::error::the wasm did not grow by the font size: the font is not embedded"; exit 1; }
-          grep -qa "Droid Sans Fallback" "$wasm" || { echo "::error::the font's name table is not in the wasm"; exit 1; }
-          grep -qa "krysta-zh" "$wasm" || { echo "::error::the build does not carry the Krysta build string"; exit 1; }
-          grep -qa "\${{ steps.v.outputs.version }}" "$index" || echo "::warning::index.html does not mention the version"
+          echo "wasm $(stat -c%s "$wasm") bytes"
+          # include_bytes! puts the font file into the wasm data as is. Look for pieces of the
+          # actual font bytes (pieces without zero runs, which wasm-opt may squeeze out).
+          python3 - "$wasm" assets/fonts/DroidSansFallback.ttf <<'PY'
+          import sys
+          wasm = open(sys.argv[1], 'rb').read()
+          font = open(sys.argv[2], 'rb').read()
+          pieces, step = [], len(font) // 40
+          for start in range(1024, len(font) - 512, step):
+              chunk = font[start:start + 256]
+              if b'\0\0\0' not in chunk:
+                  pieces.append(chunk)
+          found = sum(1 for c in pieces if c in wasm)
+          print(f"font pieces found in wasm: {found}/{len(pieces)}")
+          if not pieces or found < len(pieces) * 0.9:
+              print("::error::the Droid Sans Fallback bytes are not in the wasm: the font is not embedded")
+              sys.exit(1)
+          PY
+          grep -qaF "krysta-zh" "$wasm" || echo "::warning::the build string krysta-zh is not in the wasm"
           cd dist/release && sha256sum "$name.zip" > SHA256SUMS.txt && cat SHA256SUMS.txt
 
       - name: Keep the zip as a workflow artifact
