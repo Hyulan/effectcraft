@@ -1,0 +1,52 @@
+diff --git a/crates/text/src/fonts.rs b/crates/text/src/fonts.rs
+index 5388629..8a19cbd 100644
+--- a/crates/text/src/fonts.rs
++++ b/crates/text/src/fonts.rs
+@@ -26,6 +26,11 @@ pub static INTER_ITALIC: &[u8] = include_bytes!("../../../assets/fonts/Inter-Ita
+ pub static JETBRAINS_MONO_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf");
+ pub static NOTO_SERIF_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/NotoSerif-Regular.ttf");
+ 
++/// Open CJK fallback for the browser, which cannot scan system font folders (Krysta motion node,
++/// 2026-11-07; from upstream PR #1621). Apache-2.0, see assets/fonts/NOTICE-Droid.txt.
++#[cfg(target_arch = "wasm32")]
++pub static WEB_CJK_FALLBACK: &[u8] = include_bytes!("../../../assets/fonts/DroidSansFallback.ttf");
++
+ /// The default family for new text.
+ pub const DEFAULT_FAMILY: &str = "Inter";
+ 
+@@ -327,6 +332,10 @@ fn db() -> &'static RwLock<Db> {
+                 push(&mut db, info_from(n, FaceData::Static(b), "bundled"));
+             }
+         }
++        #[cfg(target_arch = "wasm32")]
++        for n in read_faces_bytes(WEB_CJK_FALLBACK) {
++            push(&mut db, info_from(n, FaceData::Static(WEB_CJK_FALLBACK), "bundled"));
++        }
+         RwLock::new(db)
+     })
+ }
+diff --git a/crates/ui-egui/src/theme.rs b/crates/ui-egui/src/theme.rs
+index 31ec4e2..2e7a6a8 100644
+--- a/crates/ui-egui/src/theme.rs
++++ b/crates/ui-egui/src/theme.rs
+@@ -384,12 +384,17 @@ const SCRIPT_PROBES: &[(char, &str)] = &[
+ /// the Chinese catalogs. Both scripts are registered, so file, layer and template names in the
+ /// other one still render; then [`SCRIPT_PROBES`], then Hangul, since the Japanese and Chinese faces
+ /// may lack it (Hiragino Sans on macOS has none). The web build has no system fonts
+-/// and installs nothing.
++/// and installs the bundled Droid Sans Fallback face instead.
+ fn install_script_fallbacks(family_fonts: &mut FontDefinitions, language: &str) -> Vec<String> {
+     #[cfg(target_arch = "wasm32")]
+     {
+-        let _ = (family_fonts, language);
+-        Vec::new()
++        let _ = language;
++        let name = "chinese-bundled".to_string();
++        family_fonts.font_data.insert(name.clone(), Arc::new(FontData::from_static(effectcraft_text::fonts::WEB_CJK_FALLBACK)));
++        for family in family_fonts.families.values_mut() {
++            family.push(name.clone());
++        }
++        vec![name]
+     }
+     #[cfg(not(target_arch = "wasm32"))]
+     {
