@@ -2,8 +2,10 @@ name: Krysta zh web build
 # The Krysta admin page reads the version back from this title (services/motion_node.run_version).
 run-name: "zh ${{ inputs.tag }}-zh${{ inputs.revision }} (${{ inputs.publish && 'publish' || 'artifact' }})"
 
-# 动效节点: builds an official EffectCraft web release with a bundled CJK fallback font, because the
-# browser build cannot scan system fonts and ships no CJK face (upstream #1445, PR #1621). Nothing
+# 动效节点: builds an official EffectCraft web release with bundled Chinese fonts, because the
+# browser build cannot scan system fonts and ships no CJK face (upstream #1445, PR #1621).
+# The fonts live in krysta/fonts (see its README.md; checked against krysta/fonts/SHA256SUMS.txt),
+# plus Droid Sans Fallback fetched below for the interface and for kana/Hangul. Nothing
 # runs on push or on a schedule: a build starts only when someone dispatches it (the Krysta admin
 # page, or "Run workflow" here), and only for the tag that person names.
 #
@@ -102,8 +104,12 @@ jobs:
           echo "$FONT_SHA256  assets/fonts/DroidSansFallback.ttf" | sha256sum -c -
           cp .krysta/krysta/patch/DroidSansFallback.ttf.attribution assets/fonts/
           cp .krysta/krysta/patch/NOTICE-Droid.txt assets/fonts/
+          # The Chinese fonts: every file must match krysta/fonts/SHA256SUMS.txt, and every file the
+          # patch includes must be there (a missing one fails the build at include_bytes!).
+          (cd .krysta/krysta/fonts && sha256sum -c SHA256SUMS.txt)
+          cp .krysta/krysta/fonts/*.otf .krysta/krysta/fonts/*.ttf .krysta/krysta/fonts/*-OFL.txt assets/fonts/
           git status --short
-          ls -l assets/fonts/DroidSansFallback.ttf
+          ls -l assets/fonts/
 
       - name: Tools
         if: steps.upstream.outputs.bundled == 'no'
@@ -140,21 +146,30 @@ jobs:
           echo "wasm $(stat -c%s "$wasm") bytes"
           # include_bytes! puts the font file into the wasm data as is. Look for pieces of the
           # actual font bytes (pieces without zero runs, which wasm-opt may squeeze out).
-          python3 - "$wasm" assets/fonts/DroidSansFallback.ttf <<'PY'
-          import sys
+          python3 - "$wasm" assets/fonts/DroidSansFallback.ttf .krysta/krysta/fonts/*.otf .krysta/krysta/fonts/*.ttf <<'PY'
+          import os, sys
           wasm = open(sys.argv[1], 'rb').read()
-          font = open(sys.argv[2], 'rb').read()
-          pieces, step = [], len(font) // 40
-          for start in range(1024, len(font) - 512, step):
-              chunk = font[start:start + 256]
-              if b'\0\0\0' not in chunk:
-                  pieces.append(chunk)
-          found = sum(1 for c in pieces if c in wasm)
-          print(f"font pieces found in wasm: {found}/{len(pieces)}")
-          if not pieces or found < len(pieces) * 0.9:
-              print("::error::the Droid Sans Fallback bytes are not in the wasm: the font is not embedded")
+          bad = []
+          for path in sys.argv[2:]:
+              font = open(path, 'rb').read()
+              pieces, step = [], len(font) // 40
+              for start in range(1024, len(font) - 512, step):
+                  chunk = font[start:start + 256]
+                  if b'\0\0\0' not in chunk:
+                      pieces.append(chunk)
+              found = sum(1 for c in pieces if c in wasm)
+              print(f"{os.path.basename(path)}: {found}/{len(pieces)} pieces in the wasm")
+              if not pieces or found < len(pieces) * 0.9:
+                  bad.append(os.path.basename(path))
+          if bad:
+              print("::error::these fonts are not embedded in the wasm: " + ", ".join(bad))
               sys.exit(1)
           PY
+          # The fonts' licences travel with the zip (SIL OFL 1.1 asks for that).
+          rm -rf /tmp/lic && mkdir -p "/tmp/lic/$name/fonts-licenses"
+          cp assets/fonts/*-OFL.txt assets/fonts/NOTICE-Droid.txt .krysta/krysta/fonts/README.md "/tmp/lic/$name/fonts-licenses/"
+          (cd /tmp/lic && zip -qr "$GITHUB_WORKSPACE/$zip" "$name")
+          echo "zip $(stat -c%s "$zip") bytes; unpacked $(unzip -l "$zip" | tail -1)"
           grep -qaF "krysta-zh" "$wasm" || echo "::warning::the build string krysta-zh is not in the wasm"
           cd dist/release && sha256sum "$name.zip" > SHA256SUMS.txt && cat SHA256SUMS.txt
 
@@ -175,9 +190,9 @@ jobs:
           tag_name: ${{ steps.v.outputs.version }}
           name: ${{ steps.v.outputs.version }}
           body: |
-            EffectCraft `${{ inputs.tag }}` web build with a bundled CJK fallback font, for Krysta's 动效节点.
+            EffectCraft `${{ inputs.tag }}` web build with bundled Chinese fonts, for Krysta's 动效节点.
 
-            Built from the official tag `${{ inputs.tag }}` with `krysta/patch/cjk-font.patch` (the font part of upstream #1621: Droid Sans Fallback, Apache-2.0, embedded in the browser build) and no other change.
+            Built from the official tag `${{ inputs.tag }}` with `krysta/patch/cjk-font.patch` and no other change. Embedded fonts: Noto Sans SC (Regular/Medium/Bold/Black), Noto Serif SC (Regular/Bold), LXGW WenKai (Regular/Medium), Ma Shan Zheng, Smiley Sans, ZCOOL KuaiLe (all SIL OFL 1.1) and Droid Sans Fallback (Apache-2.0). Licences are in `fonts-licenses/` inside the zip.
 
             File: `effectcraft-web-${{ steps.v.outputs.version }}.zip` with `SHA256SUMS.txt`.
           files: |

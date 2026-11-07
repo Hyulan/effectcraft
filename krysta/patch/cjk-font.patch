@@ -1,35 +1,56 @@
 diff --git a/crates/text/src/fonts.rs b/crates/text/src/fonts.rs
-index 5388629..8a19cbd 100644
+index 5388629..afcd416 100644
 --- a/crates/text/src/fonts.rs
 +++ b/crates/text/src/fonts.rs
-@@ -26,6 +26,11 @@ pub static INTER_ITALIC: &[u8] = include_bytes!("../../../assets/fonts/Inter-Ita
+@@ -26,6 +26,30 @@ pub static INTER_ITALIC: &[u8] = include_bytes!("../../../assets/fonts/Inter-Ita
  pub static JETBRAINS_MONO_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf");
  pub static NOTO_SERIF_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/NotoSerif-Regular.ttf");
  
-+/// Open CJK fallback for the browser, which cannot scan system font folders (Krysta motion node,
-+/// 2026-11-07; from upstream PR #1621). Apache-2.0, see assets/fonts/NOTICE-Droid.txt.
++/// Chinese faces for the browser, which cannot scan system font folders (Krysta 动效节点, 2026-11-07;
++/// the fallback idea is upstream PR #1621's). All SIL OFL 1.1 or Apache-2.0, see assets/fonts/*-OFL.txt
++/// and NOTICE-Droid.txt. Order matters: the first face that covers a character is its fallback, so
++/// Noto Sans SC Regular draws Chinese in a font without it; Droid Sans Fallback comes last for kana,
++/// Hangul and anything the Chinese fonts lack.
++#[cfg(target_arch = "wasm32")]
++pub static WEB_CJK_FACES: &[&[u8]] = &[
++    include_bytes!("../../../assets/fonts/NotoSansSC-Regular.otf"),
++    include_bytes!("../../../assets/fonts/NotoSansSC-Medium.otf"),
++    include_bytes!("../../../assets/fonts/NotoSansSC-Bold.otf"),
++    include_bytes!("../../../assets/fonts/NotoSansSC-Black.otf"),
++    include_bytes!("../../../assets/fonts/NotoSerifSC-Regular.otf"),
++    include_bytes!("../../../assets/fonts/NotoSerifSC-Bold.otf"),
++    include_bytes!("../../../assets/fonts/LXGWWenKai-Regular.ttf"),
++    include_bytes!("../../../assets/fonts/LXGWWenKai-Medium.ttf"),
++    include_bytes!("../../../assets/fonts/MaShanZheng-Regular.ttf"),
++    include_bytes!("../../../assets/fonts/SmileySans-Oblique.ttf"),
++    include_bytes!("../../../assets/fonts/ZCOOLKuaiLe-Regular.ttf"),
++    WEB_CJK_FALLBACK,
++];
++/// The interface's own fallback face (egui): Droid Sans Fallback, small and with kana and Hangul.
 +#[cfg(target_arch = "wasm32")]
 +pub static WEB_CJK_FALLBACK: &[u8] = include_bytes!("../../../assets/fonts/DroidSansFallback.ttf");
 +
  /// The default family for new text.
  pub const DEFAULT_FAMILY: &str = "Inter";
  
-@@ -327,6 +332,10 @@ fn db() -> &'static RwLock<Db> {
+@@ -327,6 +351,12 @@ fn db() -> &'static RwLock<Db> {
                  push(&mut db, info_from(n, FaceData::Static(b), "bundled"));
              }
          }
 +        #[cfg(target_arch = "wasm32")]
-+        for n in read_faces_bytes(WEB_CJK_FALLBACK) {
-+            push(&mut db, info_from(n, FaceData::Static(WEB_CJK_FALLBACK), "bundled"));
++        for b in WEB_CJK_FACES.iter().copied() {
++            for n in read_faces_bytes(b) {
++                push(&mut db, info_from(n, FaceData::Static(b), "bundled"));
++            }
 +        }
          RwLock::new(db)
      })
  }
 diff --git a/crates/ui-egui/src/theme.rs b/crates/ui-egui/src/theme.rs
-index 31ec4e2..2e7a6a8 100644
+index e67bd2d..f595ccc 100644
 --- a/crates/ui-egui/src/theme.rs
 +++ b/crates/ui-egui/src/theme.rs
-@@ -384,12 +384,17 @@ const SCRIPT_PROBES: &[(char, &str)] = &[
+@@ -456,12 +456,17 @@ fn baseline_tweak(row: &effectcraft_text::fonts::Face, face: &effectcraft_text::
  /// the Chinese catalogs. Both scripts are registered, so file, layer and template names in the
  /// other one still render; then [`SCRIPT_PROBES`], then Hangul, since the Japanese and Chinese faces
  /// may lack it (Hiragino Sans on macOS has none). The web build has no system fonts
