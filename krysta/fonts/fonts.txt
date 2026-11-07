@@ -1,8 +1,9 @@
-# 动效节点中文版打包的字体：一行一款，「字体文件 | 许可证文件」，文件都放在这个文件夹里。
-# 顺序有用：打中文时用第一款能显示这个字的字体，所以第一行是默认中文字体（英文字体里打中文也用它）。
+# 动效节点中文版打包的字体：一行一款，「字体文件 | 许可证文件 | 加载方式」，文件都放在这个文件夹里。
+# 顺序有用：打中文时用第一款能显示这个字的内置字体，所以第一行是默认中文字体（英文字体里打中文也用它）。
+# 加载方式：embed = 打进 wasm，一直都在；ondemand = 单独放在 fonts/，工程用到时才下载（不写时第一行 embed、其余 ondemand）。
 # 同一字体族的不同粗细放在一起。Droid Sans Fallback 由构建流程自动加在最后，不写在这里。
 # 改完这个文件后，在 Krysta 后台「动效编辑器 → 中文版」点「构建中文版」。
-NotoSansSC-Regular.otf   | NotoSansSC-OFL.txt
+NotoSansSC-Regular.otf   | NotoSansSC-OFL.txt  | embed
 NotoSansSC-Medium.otf    | NotoSansSC-OFL.txt
 NotoSansSC-Bold.otf      | NotoSansSC-OFL.txt
 NotoSansSC-Black.otf     | NotoSansSC-OFL.txt
