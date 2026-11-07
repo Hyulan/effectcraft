@@ -4,8 +4,9 @@ run-name: "zh ${{ inputs.tag }}-zh${{ inputs.revision }} (${{ inputs.publish && 
 
 # 动效节点: builds an official EffectCraft web release with bundled Chinese fonts, because the
 # browser build cannot scan system fonts and ships no CJK face (upstream #1445, PR #1621).
-# The fonts live in krysta/fonts (see its README.md; checked against krysta/fonts/SHA256SUMS.txt),
-# plus Droid Sans Fallback fetched below for the interface and for kana/Hangul. Nothing
+# The Chinese fonts are whatever krysta/fonts/fonts.txt lists (file | licence, in order; the Krysta admin
+# page's 「上传字体」 adds lines there). krysta/build_fonts.py checks them and writes the font list the patch
+# includes, so adding a font never needs a patch edit. Droid Sans Fallback is fetched below and goes last. Nothing
 # runs on push or on a schedule: a build starts only when someone dispatches it (the Krysta admin
 # page, or "Run workflow" here), and only for the tag that person names.
 #
@@ -100,14 +101,14 @@ jobs:
             exit 1
           fi
           git apply "$patch_file"
+          pip install --quiet "fonttools==4.55.3"
+          python3 .krysta/krysta/build_fonts.py --fonts .krysta/krysta/fonts --assets assets/fonts \
+            --out crates/text/src/krysta_web_fonts.rs --list /tmp/krysta-fonts.txt --licences /tmp/krysta-licences.txt --body /tmp/krysta-body.md \
+            --tag "${{ steps.v.outputs.tag }}"
           curl -fsSL --retry 3 -o assets/fonts/DroidSansFallback.ttf "$FONT_URL"
           echo "$FONT_SHA256  assets/fonts/DroidSansFallback.ttf" | sha256sum -c -
           cp .krysta/krysta/patch/DroidSansFallback.ttf.attribution assets/fonts/
           cp .krysta/krysta/patch/NOTICE-Droid.txt assets/fonts/
-          # The Chinese fonts: every file must match krysta/fonts/SHA256SUMS.txt, and every file the
-          # patch includes must be there (a missing one fails the build at include_bytes!).
-          (cd .krysta/krysta/fonts && sha256sum -c SHA256SUMS.txt)
-          cp .krysta/krysta/fonts/*.otf .krysta/krysta/fonts/*.ttf .krysta/krysta/fonts/*-OFL.txt assets/fonts/
           git status --short
           ls -l assets/fonts/
 
@@ -146,7 +147,7 @@ jobs:
           echo "wasm $(stat -c%s "$wasm") bytes"
           # include_bytes! puts the font file into the wasm data as is. Look for pieces of the
           # actual font bytes (pieces without zero runs, which wasm-opt may squeeze out).
-          python3 - "$wasm" assets/fonts/DroidSansFallback.ttf .krysta/krysta/fonts/*.otf .krysta/krysta/fonts/*.ttf <<'PY'
+          python3 - "$wasm" assets/fonts/DroidSansFallback.ttf $(cat /tmp/krysta-fonts.txt) <<'PY'
           import os, sys
           wasm = open(sys.argv[1], 'rb').read()
           bad = []
@@ -167,9 +168,18 @@ jobs:
           PY
           # The fonts' licences travel with the zip (SIL OFL 1.1 asks for that).
           rm -rf /tmp/lic && mkdir -p "/tmp/lic/$name/fonts-licenses"
-          cp assets/fonts/*-OFL.txt assets/fonts/NOTICE-Droid.txt .krysta/krysta/fonts/README.md "/tmp/lic/$name/fonts-licenses/"
+          while IFS= read -r licence || [ -n "$licence" ]; do
+            cp ".krysta/krysta/fonts/$licence" "/tmp/lic/$name/fonts-licenses/"
+          done < /tmp/krysta-licences.txt
+          cp assets/fonts/NOTICE-Droid.txt .krysta/krysta/fonts/fonts.txt "/tmp/lic/$name/fonts-licenses/"
           (cd /tmp/lic && zip -qr "$GITHUB_WORKSPACE/$zip" "$name")
-          echo "zip $(stat -c%s "$zip") bytes; unpacked $(unzip -l "$zip" | tail -1)"
+          size=$(stat -c%s "$zip")
+          echo "zip $size bytes; unpacked $(unzip -l "$zip" | tail -1)"
+          # The Krysta server installs at most 250 MiB (services/motion_node.MAX_ZIP_BYTES).
+          if [ "$size" -gt 262144000 ]; then
+            echo "::error::the zip is $((size / 1048576)) MiB, over the 250 MiB the Krysta server installs: remove a font from krysta/fonts/fonts.txt"
+            exit 1
+          fi
           grep -qaF "krysta-zh" "$wasm" || echo "::warning::the build string krysta-zh is not in the wasm"
           cd dist/release && sha256sum "$name.zip" > SHA256SUMS.txt && cat SHA256SUMS.txt
 
@@ -189,12 +199,7 @@ jobs:
         with:
           tag_name: ${{ steps.v.outputs.version }}
           name: ${{ steps.v.outputs.version }}
-          body: |
-            EffectCraft `${{ inputs.tag }}` web build with bundled Chinese fonts, for Krysta's 动效节点.
-
-            Built from the official tag `${{ inputs.tag }}` with `krysta/patch/cjk-font.patch` and no other change. Embedded fonts: Noto Sans SC (Regular/Medium/Bold/Black), Noto Serif SC (Regular/Bold), LXGW WenKai (Regular/Medium), Ma Shan Zheng, Smiley Sans, ZCOOL KuaiLe (all SIL OFL 1.1) and Droid Sans Fallback (Apache-2.0). Licences are in `fonts-licenses/` inside the zip.
-
-            File: `effectcraft-web-${{ steps.v.outputs.version }}.zip` with `SHA256SUMS.txt`.
+          body_path: /tmp/krysta-body.md
           files: |
             dist/release/*.zip
             dist/release/SHA256SUMS.txt
