@@ -1,0 +1,54 @@
+name: Krysta font test
+# Checks a Chinese web build made with krysta/patch/runtime-fonts.patch in a real browser: an ondemand font
+# is absent at start, effectcraft.addFont registers it on the page and in the render workers, and text drawn
+# with it changes. Runs only when dispatched, on the artifact or release of an earlier build run.
+run-name: "font test ${{ inputs.version }} (run ${{ inputs.run_id }})"
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Run id of the krysta-zh-web build whose artifact to test"
+        type: string
+        required: true
+      version:
+        description: "Version in that artifact, e.g. 0.22.0-zh2"
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.version }}
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+          path: art
+      - name: Unpack and serve
+        run: |
+          set -euo pipefail
+          mkdir -p site && unzip -q "art/effectcraft-web-${{ inputs.version }}.zip" -d site
+          ls -l "site/effectcraft-web-${{ inputs.version }}" "site/effectcraft-web-${{ inputs.version }}/fonts"
+          (cd site && nohup python3 -m http.server 8765 --bind 127.0.0.1 > /tmp/srv.log 2>&1 &)
+          sleep 1
+      - name: Browser test
+        run: |
+          set -euo pipefail
+          mkdir -p t && cp krysta/test/font-test.mjs t/ && cd t
+          npm init -y > /dev/null
+          npm i playwright@1.55.0 > /dev/null
+          npx playwright install --with-deps chromium > /dev/null
+          node font-test.mjs "http://127.0.0.1:8765/effectcraft-web-${{ inputs.version }}/"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: font-test-${{ inputs.version }}
+          path: t/shot-*.png
+          retention-days: 7
