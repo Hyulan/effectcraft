@@ -1,4 +1,6 @@
 name: Krysta zh web build
+# The Krysta admin page reads the version back from this title (services/motion_node.run_version).
+run-name: "zh ${{ inputs.tag }}-zh${{ inputs.revision }} (${{ inputs.publish && 'publish' || 'artifact' }})"
 
 # 动效节点: builds an official EffectCraft web release with a bundled CJK fallback font, because the
 # browser build cannot scan system fonts and ships no CJK face (upstream #1445, PR #1621). Nothing
