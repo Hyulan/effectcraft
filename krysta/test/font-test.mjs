@@ -30,6 +30,22 @@ const report = await page.evaluate(async (base) => {
   out.familiesAfter = await fams();
   const loaded = await frame();
   out.pageChanged = loaded !== fallback;
+  // Which cache keeps the fallback drawing: memory purge, full purge (memory + disk), reopening the project.
+  await ec.execute("edit.purge", { what: "memory" });
+  out.afterPurgeMemory = (await frame()) !== fallback;
+  await ec.execute("edit.purge", { what: "all" });
+  out.afterPurgeAll = (await frame()) !== fallback;
+  const saved = await ec.saveToBrowser("/t/reopen.ecproj");
+  const bytes = await ec.readFile(saved.path);
+  await ec.addFile(new Blob([bytes], { type: "application/json" }), "reopen2.ecproj");
+  for (let i = 0; i < 50; i++) {
+    if (String((await ec.execute("project.summary", {}))?.path ?? "").endsWith("reopen2.ecproj")) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  out.afterReopen = (await frame()) !== fallback;
+  // A project that already names the font, opened AFTER the font is there (the editor's order): drawn with it.
+  const made2 = await ec.execute("layer.newText", { text, font: "LXGW WenKai", size: 64, fill: "#000000", position: [240, 100] });
+  out.newLayerAfterLoad = Boolean(made2);
   // Same text in the embedded default face: the loaded face must differ from it too.
   await ec.execute("layer.setText", { layer: made?.layer, font: "Noto Sans SC" });
   const noto = await frame();
@@ -58,14 +74,43 @@ const report = await page.evaluate(async (base) => {
   out.familiesAll = await fams();
   out.memory = performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : null;
   out.images = { fallback, loaded, noto };
+  const keep = await ec.saveToBrowser("/t/order.ecproj");
+  out.project = new TextDecoder().decode(await ec.readFile(keep.path));
   return out;
 }, base);
 const fs = await import("node:fs");
 for (const [k, v] of Object.entries(report.images)) fs.writeFileSync(`shot-${k}.png`, Buffer.from(v, "base64"));
+const projectBytes = report.project;
 delete report.images;
+delete report.project;
+// The editor's order on a fresh page: addFont first, then open a project that names the font. It must draw with
+// the font straight away (same pixels as after forcing a new layout by switching the font away and back).
+const page2 = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+page2.on("pageerror", (e) => errors.push("page2 " + String(e).slice(0, 300)));
+await page2.goto(`${base}?empty&nosw`, { waitUntil: "load" });
+await page2.waitForFunction(() => window.effectcraftLoad?.readyMs, null, { timeout: 180000 });
+report.order = await page2.evaluate(async ({ base, project }) => {
+  const ec = window.effectcraft;
+  const manifest = await (await fetch(base + "fonts/fonts.json")).json();
+  const lx = manifest.fonts.find((f) => f.family === "LXGW WenKai" && f.style === "Regular");
+  await ec.addFont(base + "fonts/" + lx.file);
+  await ec.addFile(new Blob([project], { type: "application/json" }), "order.ecproj");
+  for (let i = 0; i < 50; i++) {
+    if (String((await ec.execute("project.summary", {}))?.path ?? "").endsWith("order.ecproj")) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  const first = (await ec.renderFrame({ time: 0.5 })).png;
+  const comp = await ec.execute("comp.info", {});
+  const text = (comp?.layers ?? []).find((l) => /Text/i.test(String(l.type)));
+  await ec.execute("layer.setText", { layer: text?.id, font: "Noto Sans SC" });
+  await ec.execute("layer.setText", { layer: text?.id, font: "LXGW WenKai" });
+  const forced = (await ec.renderFrame({ time: 0.5 })).png;
+  return { sameAsForced: first === forced, layer: text?.name ?? null };
+}, { base, project: projectBytes });
 report.ms = Date.now() - t0;
 report.errors = errors;
 console.log("KRYSTA_FONT_TEST " + JSON.stringify(report));
 await browser.close();
-const ok = report.pageChanged && report.differsFromDefault && report.familiesAfter.includes("LXGW WenKai") && !report.familiesBefore.includes("LXGW WenKai");
+const ok = report.differsFromDefault && report.familiesAfter.includes("LXGW WenKai") && !report.familiesBefore.includes("LXGW WenKai")
+  && report.workerCheck?.maxDiff === 0 && report.order?.sameAsForced === true;
 process.exit(ok ? 0 : 1);
