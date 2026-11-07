@@ -63,7 +63,7 @@ const r1 = await p1.evaluate(async () => {
   out.added = await k.font("LXGW WenKai");
   out.addMs = Math.round(performance.now() - t);
   out.familiesAfter = ((await ec.execute("text.fonts", {}))?.families ?? []).map((f) => f.family);
-  // A layer created now, with the font there.
+  // A layer created now, with the font there (same size, text and position as A).
   await k.comp("B", "LXGW WenKai");
   const compB = (await ec.execute("project.summary", {})).activeComp;
   const lxgw = await k.frame(compB);
@@ -75,13 +75,9 @@ const r1 = await p1.evaluate(async () => {
   out.lxgwVsFallback = await k.diff(lxgw, fallbackA);
   out.lxgwVsNoto = await k.diff(lxgw, noto);
   out.lxgwStable = await k.diff(lxgw, lxgwAgain);
-  // The old layer A: still the fallback? (expected: yes, until its font property is set again)
-  out.oldLayerStale = (await k.diff(await k.frame(compA), fallbackA)) === 0;
-  try {
-    await ec.execute("layer.setText", { layer: a, font: "Noto Sans SC" });
-    await ec.execute("layer.setText", { layer: a, font: "LXGW WenKai" });
-    out.oldLayerAfterReset = await k.diff(await k.frame(compA), lxgw);
-  } catch (e) { out.oldLayerAfterReset = String(e); }
+  // Comp A was drawn before the font came: with the layout cache cleared by addFont it now draws like comp B.
+  out.oldCompVsLxgw = await k.diff(await k.frame(compA), lxgw);
+  out.diskBefore = await ec.execute("cache.diskStats", {}).catch((e) => String(e));
   // Render workers: a frame worker and a Render Queue job (job worker) must draw the loaded face too.
   try { out.workerCheck = await ec.workerFrameCheck({ time: 0.5 }); } catch (e) { out.workerCheck = String(e); }
   const job = await ec.execute("renderQueue.add", { comp: compB, format: "png", output: "/out/b.png", start: 0.5, end: 0.53 });
@@ -121,13 +117,18 @@ const r2 = await p2.evaluate(async ({ project, compA, lxgw }) => {
     if (String((await ec.execute("project.summary", {}))?.path ?? "").endsWith("p.ecproj")) break;
     await new Promise((r) => setTimeout(r, 100));
   }
-  return { reopenedVsLxgw: await k.diff(await k.frame(compA), lxgw) };
+  const reopened = await k.frame(compA);
+  // An independent reference on this page: a new comp made after the font was added.
+  await k.comp("R", "LXGW WenKai");
+  const reference = await k.frame((await ec.execute("project.summary", {})).activeComp);
+  return { reopenedVsLxgw: await k.diff(reopened, lxgw), reopenedVsReference: await k.diff(reopened, reference),
+           referenceVsPage1: await k.diff(reference, lxgw), disk: await ec.execute("cache.diskStats", {}).catch((e) => String(e)) };
 }, { project, compA, lxgw: images.lxgw });
 
 const report = { ...r1, ...r2, ms: Date.now() - t0, errors };
 console.log("KRYSTA_FONT_TEST " + JSON.stringify(report));
 await browser.close();
 const ok = !report.familiesBefore.includes("LXGW WenKai") && report.familiesAfter.includes("LXGW WenKai")
-  && report.lxgwVsFallback > 64 && report.lxgwVsNoto > 64 && report.lxgwStable === 0 && report.oldLayerAfterReset === 0
-  && report.workerCheck?.maxDiff === 0 && report.jobVsPage <= 2 && report.reopenedVsLxgw === 0 && !errors.length;
+  && report.lxgwVsFallback > 64 && report.lxgwVsNoto > 64 && report.lxgwStable === 0 && report.oldCompVsLxgw === 0
+  && report.workerCheck?.maxDiff === 0 && report.jobVsPage <= 2 && report.reopenedVsReference === 0 && report.referenceVsPage1 === 0 && !errors.length;
 process.exit(ok ? 0 : 1);
