@@ -4,8 +4,10 @@ run-name: "zh ${{ inputs.tag }}-zh${{ inputs.revision }} (${{ inputs.publish && 
 
 # 动效节点: builds an official EffectCraft web release with bundled Chinese fonts, because the
 # browser build cannot scan system fonts and ships no CJK face (upstream #1445, PR #1621).
-# The Chinese fonts are whatever krysta/fonts/fonts.txt lists (file | licence, in order; the Krysta admin
-# page's 「上传字体」 adds lines there). krysta/build_fonts.py checks them and writes the font list the patch
+# The Chinese fonts are whatever krysta/fonts/fonts.txt lists (file | licence [| embed / ondemand], in order;
+# the Krysta admin page's 「上传字体」 adds lines there). Since 2026-11-07 only the embed ones go into the wasm;
+# the others ship in the zip's fonts/ (with fonts.json) and Krysta's editor loads them when a project uses
+# them, through effectcraft.addFont from krysta/patch/runtime-fonts.patch. krysta/build_fonts.py checks them and writes the font list the patch
 # includes, so adding a font never needs a patch edit. Droid Sans Fallback is fetched below and goes last. Nothing
 # runs on push or on a schedule: a build starts only when someone dispatches it (the Krysta admin
 # page, or "Run workflow" here), and only for the tag that person names.
@@ -87,7 +89,8 @@ jobs:
         if: steps.upstream.outputs.bundled == 'no'
         uses: actions/checkout@v4
         with:
-          ref: main
+          # The commit this run was dispatched on (main for the Krysta admin page), so a branch can be tried first.
+          ref: ${{ github.sha }}
           path: .krysta
 
       - name: Apply the CJK font patch and add the font
@@ -101,12 +104,20 @@ jobs:
             exit 1
           fi
           git apply "$patch_file"
+          runtime=".krysta/krysta/patch/runtime-fonts.patch"
+          test -f "$runtime" || { echo "::error::$runtime is missing"; exit 1; }
+          if ! git apply --check -v "$runtime"; then
+            echo "::error::runtime-fonts.patch no longer applies to ${{ steps.v.outputs.tag }}: upstream changed apps/effectcraft-web (api.rs, js/host.js, web/worker.js or web/index.html). Update the patch, then dispatch again. Nothing was published."
+            exit 1
+          fi
+          git apply "$runtime"
+          curl -fsSL --retry 3 -o assets/fonts/DroidSansFallback.ttf "$FONT_URL"
+          echo "$FONT_SHA256  assets/fonts/DroidSansFallback.ttf" | sha256sum -c -
           pip install --quiet "fonttools==4.55.3"
           python3 .krysta/krysta/build_fonts.py --fonts .krysta/krysta/fonts --assets assets/fonts \
             --out crates/text/src/krysta_web_fonts.rs --list /tmp/krysta-fonts.txt --licences /tmp/krysta-licences.txt --body /tmp/krysta-body.md \
-            --tag "${{ steps.v.outputs.tag }}"
-          curl -fsSL --retry 3 -o assets/fonts/DroidSansFallback.ttf "$FONT_URL"
-          echo "$FONT_SHA256  assets/fonts/DroidSansFallback.ttf" | sha256sum -c -
+            --tag "${{ steps.v.outputs.tag }}" --site-fonts /tmp/krysta-site-fonts --droid assets/fonts/DroidSansFallback.ttf \
+            --ondemand-list /tmp/krysta-ondemand.txt
           cp .krysta/krysta/patch/DroidSansFallback.ttf.attribution assets/fonts/
           cp .krysta/krysta/patch/NOTICE-Droid.txt assets/fonts/
           git status --short
@@ -166,12 +177,40 @@ jobs:
               print("::error::these fonts are not embedded in the wasm: " + ", ".join(bad))
               sys.exit(1)
           PY
+          # The ondemand fonts must NOT be in the wasm (that is the point of loading them on demand).
+          python3 - "$wasm" $(cat /tmp/krysta-ondemand.txt) <<'PY'
+          import os, sys
+          wasm = open(sys.argv[1], 'rb').read()
+          bad = []
+          for path in sys.argv[2:]:
+              font = open(path, 'rb').read()
+              pieces, step = [], max(1, len(font) // 40)
+              for start in range(1024, len(font) - 512, step):
+                  chunk = font[start:start + 256]
+                  if b'\0\0\0' not in chunk:
+                      pieces.append(chunk)
+              found = sum(1 for c in pieces if c in wasm)
+              print(f"ondemand {os.path.basename(path)}: {found}/{len(pieces)} pieces in the wasm")
+              if pieces and found > len(pieces) * 0.1:
+                  bad.append(os.path.basename(path))
+          if bad:
+              print("::error::these ondemand fonts ended up inside the wasm: " + ", ".join(bad))
+              sys.exit(1)
+          PY
+          js="/tmp/zh/$name/effectcraft_web.js"
+          for symbol in addFont workerFont krystaFontAdded; do
+            grep -qaF "$symbol" "$js" /tmp/zh/$name/snippets/*/js/host.js || { echo "::error::$symbol is not in the build: runtime-fonts.patch did not take"; exit 1; }
+          done
+          grep -qaF '"font"' "/tmp/zh/$name/worker.js" || { echo "::error::worker.js does not handle font messages"; exit 1; }
           # The fonts' licences travel with the zip (SIL OFL 1.1 asks for that).
           rm -rf /tmp/lic && mkdir -p "/tmp/lic/$name/fonts-licenses"
           while IFS= read -r licence || [ -n "$licence" ]; do
             cp ".krysta/krysta/fonts/$licence" "/tmp/lic/$name/fonts-licenses/"
           done < /tmp/krysta-licences.txt
           cp assets/fonts/NOTICE-Droid.txt .krysta/krysta/fonts/fonts.txt "/tmp/lic/$name/fonts-licenses/"
+          # fonts/: every font + fonts.json (the editor fetches the ondemand ones; the Krysta server installs all
+          # of them for effectcraft-cli, so the server draws text with the same faces as the browser).
+          cp -r /tmp/krysta-site-fonts "/tmp/lic/$name/fonts"
           (cd /tmp/lic && zip -qr "$GITHUB_WORKSPACE/$zip" "$name")
           size=$(stat -c%s "$zip")
           echo "zip $size bytes; unpacked $(unzip -l "$zip" | tail -1)"

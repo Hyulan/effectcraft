@@ -1,0 +1,168 @@
+diff --git a/apps/effectcraft-web/js/host.js b/apps/effectcraft-web/js/host.js
+index c8e91a2..82d7015 100644
+--- a/apps/effectcraft-web/js/host.js
++++ b/apps/effectcraft-web/js/host.js
+@@ -330,6 +330,24 @@ export function setJobWorkerGpu(on) {
+   jobWorkerGpu = !!on;
+ }
+ 
++// Krysta 动效节点 (2026-11-07): fonts added at run time (`effectcraft.addFont`), sent to every render
++// worker: the ones running now, and each new one right after its init (messages are handled in order, so
++// a font always arrives before the first job or frame that could use it).
++const krystaFonts = [];
++
++function krystaSendFonts(worker) {
++  for (const bytes of krystaFonts) worker.postMessage({ type: "font", bytes });
++}
++
++/// Called by `addFont` on the page (src/api.rs) after the page's own engine registered the font.
++export function krystaFontAdded(bytes) {
++  const copy = new Uint8Array(bytes);
++  krystaFonts.push(copy);
++  for (const w of idle) w.worker.postMessage({ type: "font", bytes: copy });
++  for (const w of running.values()) w.worker.postMessage({ type: "font", bytes: copy });
++  for (const worker of frameWorkers) if (worker) worker.postMessage({ type: "font", bytes: copy });
++}
++
+ function spawn(base) {
+   const worker = new Worker(new URL("worker.js", base), { type: "module", name: "effectcraft-worker" });
+   const w = { worker, files: new Map(), ready: null, gpu: null };
+@@ -344,6 +362,7 @@ function spawn(base) {
+     worker.onerror = (e) => rej(new Error(e.message || "worker failed to start"));
+   });
+   worker.postMessage({ type: "init", module: self.effectcraftModule ?? null, base, gpu: jobWorkerGpu });
++  krystaSendFonts(worker);
+   return w;
+ }
+ 
+@@ -445,6 +464,7 @@ export function frameWorkerStart(base, onMessage, gpu) {
+     worker.terminate();
+   };
+   worker.postMessage({ type: "init", module: self.effectcraftModule ?? null, base, frames: true, gpu: !!gpu });
++  krystaSendFonts(worker);
+   frameWorkers.push(worker);
+   return index;
+ }
+diff --git a/apps/effectcraft-web/src/api.rs b/apps/effectcraft-web/src/api.rs
+index 793e557..77950db 100644
+--- a/apps/effectcraft-web/src/api.rs
++++ b/apps/effectcraft-web/src/api.rs
+@@ -83,6 +83,58 @@ pub fn add_file(name: String, data: js_sys::Uint8Array) -> String {
+     path
+ }
+ 
++// Krysta 动效节点 (2026-11-07): fonts added at run time, so a Chinese build can keep most of its faces
++// out of the wasm and the page loads only the ones a project uses (krysta/patch/runtime-fonts.patch).
++#[wasm_bindgen(module = "/js/host.js")]
++extern "C" {
++    #[wasm_bindgen(js_name = krystaFontAdded)]
++    fn krysta_font_added(bytes: &js_sys::Uint8Array);
++}
++
++/// The faces `add_font_data` registered: `[{family, style}]`.
++fn added_faces(ids: &[effectcraft_engine::text::fonts::FaceId]) -> Value {
++    Value::Array(
++        ids.iter()
++            .map(|&id| {
++                let face = effectcraft_engine::text::fonts::face(id);
++                json!({"family": face.info.family, "style": face.info.style})
++            })
++            .collect(),
++    )
++}
++
++/// Register a font (TrueType / OpenType bytes) with the page's engine and every render worker
++/// (present and future), then drop the text layout cache and the memory caches so text laid out
++/// with a fallback face is laid out again. Frames already in the disk cache are not touched: the
++/// editor purges them (`edit.purge {what: "all"}`) when a font arrives after its project was drawn. Resolves with the faces added: `[{family, style}]` (empty when the bytes are no font).
++#[wasm_bindgen(js_name = addFont)]
++pub fn add_font(data: js_sys::Uint8Array) -> js_sys::Promise {
++    let ids = effectcraft_engine::text::fonts::add_font_data(data.to_vec());
++    if !ids.is_empty() {
++        effectcraft_engine::text::layout::clear_layout_cache();
++        krysta_font_added(&data);
++    }
++    let faces = added_faces(&ids);
++    js_sys::Promise::new(&mut |resolve, _reject| {
++        let faces = faces.clone();
++        crate::post(move |app| {
++            let _ = app.session.execute("edit.purge", json!({"what": "memory"}));
++            let _ = resolve.call1(&JsValue::NULL, &to_js(&faces));
++        });
++        crate::repaint();
++    })
++}
++
++/// The same inside a render worker (`worker.js`, message `font`): register only, no broadcast.
++#[wasm_bindgen(js_name = workerFont)]
++pub fn worker_font(data: js_sys::Uint8Array) -> JsValue {
++    let ids = effectcraft_engine::text::fonts::add_font_data(data.to_vec());
++    if !ids.is_empty() {
++        effectcraft_engine::text::layout::clear_layout_cache();
++    }
++    to_js(&added_faces(&ids))
++}
++
+ /// Backend and build facts.
+ #[wasm_bindgen]
+ pub fn info() -> JsValue {
+diff --git a/apps/effectcraft-web/web/index.html b/apps/effectcraft-web/web/index.html
+index 8504900..8a54f67 100644
+--- a/apps/effectcraft-web/web/index.html
++++ b/apps/effectcraft-web/web/index.html
+@@ -67,6 +67,13 @@
+         }
+         return ec.addFile(name, bytes);
+       },
++      // Krysta 动效节点: register a font (bytes, Blob or URL) with the page and its render workers.
++      addFont: async (fontOrUrl) => {
++        const bytes = typeof fontOrUrl === "string"
++          ? new Uint8Array(await (await fetch(fontOrUrl)).arrayBuffer())
++          : fontOrUrl instanceof Uint8Array ? fontOrUrl : new Uint8Array(await fontOrUrl.arrayBuffer());
++        return ec.addFont(bytes);
++      },
+       info: () => ({
+         ...ec.info(),
+         crossOriginIsolated: self.crossOriginIsolated,
+diff --git a/apps/effectcraft-web/web/worker.js b/apps/effectcraft-web/web/worker.js
+index 2d2c154..ea09cfd 100644
+--- a/apps/effectcraft-web/web/worker.js
++++ b/apps/effectcraft-web/web/worker.js
+@@ -16,6 +16,7 @@ let queue = Promise.resolve();
+ 
+ async function handle(m) {
+   if (m.type === "file") ec.workerFile(m.path, m.bytes);
++  else if (m.type === "font") ec.workerFont(m.bytes);
+   else if (m.type === "job") await ec.workerJob(m.json);
+   else if (m.type === "frame") await ec.workerFrame(m.json);
+ }
+diff --git a/crates/text/src/fonts.rs b/crates/text/src/fonts.rs
+index 4624d40..46d5938 100644
+--- a/crates/text/src/fonts.rs
++++ b/crates/text/src/fonts.rs
+@@ -375,6 +375,8 @@ pub fn add_font_data(data: Vec<u8>) -> Vec<FaceId> {
+     let mut d = db().write().unwrap_or_else(std::sync::PoisonError::into_inner);
+     let ids = names.into_iter().map(|n| push(&mut d, info_from(n, FaceData::Shared(data.clone()), "user"))).collect();
+     family_faces_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
++    // Krysta (runtime-fonts.patch): a block that no face covered may be covered now.
++    fallback_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+     ids
+ }
+ 
+diff --git a/crates/text/src/layout.rs b/crates/text/src/layout.rs
+index 4c0b5a4..09d32df 100644
+--- a/crates/text/src/layout.rs
++++ b/crates/text/src/layout.rs
+@@ -1251,6 +1251,12 @@ fn cache() -> &'static Mutex<HashMap<u64, (u64, Arc<Layout>)>> {
+     C.get_or_init(Default::default)
+ }
+ 
++/// Krysta (runtime-fonts.patch): forget every cached layout. The cache is keyed by text and styles only, so a
++/// layout made while a family was missing (drawn with the fallback face) would otherwise outlive the font's arrival.
++pub fn clear_layout_cache() {
++    cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
++}
++
+ /// Lay out `text` in one style (cached by text and styles).
+ pub fn layout(text: &str, style: &TextStyle, para: &ParagraphStyle) -> Arc<Layout> {
+     layout_rich(text, &[(0..text.len(), style.clone())], std::slice::from_ref(para))
